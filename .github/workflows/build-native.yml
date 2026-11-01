@@ -1,0 +1,104 @@
+name: Build native string-decrypt libs
+
+# Build libnovanative cho cả Windows/Linux/macOS (x64 + macOS arm64) bằng máy
+# ảo thật của từng OS trên GitHub - không cần cross-compile toolchain trên
+# máy bạn. Kết quả tải về ở tab "Actions" -> chọn lần chạy -> mục "Artifacts".
+#
+# Cách dùng:
+#   1. Push repo này lên GitHub (hoặc fork), tab Actions -> chọn workflow này
+#      -> "Run workflow", nhập BUILD_SECRET (số hex 32-bit, vd 0x1A2B3C4D).
+#   2. Hoặc đơn giản: push code lên nhánh bất kỳ, workflow tự chạy với
+#      BUILD_SECRET mặc định bên dưới (ĐỔI secret mặc định trước khi dùng
+#      cho bản release thật, đừng dùng y nguyên giá trị mẫu).
+#   3. Sau khi chạy xong, tải artifact "novanative-libs", giải nén, đổi tên
+#      đúng theo NativeStringEncryptTransformer cần (win-x64.bin,
+#      linux-x64.bin, mac-x64.bin, mac-arm64.bin) rồi bỏ vào thư mục
+#      native-libs/ (hoặc thư mục bạn cấu hình NativeLibsDir) trước khi chạy
+#      Grunt với NativeStringEncrypt.BuildSecret CÙNG giá trị đã nhập ở đây.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_secret:
+        description: "BUILD_SECRET (hex 32-bit, vd 0x1A2B3C4D) - PHẢI khớp NativeStringEncrypt.BuildSecret trong config Grunt"
+        required: false
+        default: "0x1A2B3C4D"
+  push:
+    paths:
+      - "native/stringdecrypt/**"
+      - ".github/workflows/build-native.yml"
+
+env:
+  BUILD_SECRET: ${{ github.event.inputs.build_secret || '0x1A2B3C4D' }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: novanative.dll
+            out_name: win-x64.bin
+          - os: ubuntu-latest
+            artifact_name: novanative.so
+            out_name: linux-x64.bin
+          - os: macos-13 # Intel
+            artifact_name: novanative.dylib
+            out_name: mac-x64.bin
+          - os: macos-14 # Apple Silicon
+            artifact_name: novanative.dylib
+            out_name: mac-arm64.bin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S native/stringdecrypt -B native/stringdecrypt/build \
+                -DBUILD_SECRET=${{ env.BUILD_SECRET }} \
+                -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build native/stringdecrypt/build --config Release
+
+      - name: Collect output (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          find native/stringdecrypt/build -name "${{ matrix.artifact_name }}" -exec cp {} dist/${{ matrix.out_name }} \;
+
+      - name: Collect output (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $f = Get-ChildItem -Path native/stringdecrypt/build -Recurse -Filter "${{ matrix.artifact_name }}" | Select-Object -First 1
+          Copy-Item $f.FullName "dist/${{ matrix.out_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novanative-libs-${{ matrix.out_name }}
+          path: dist/${{ matrix.out_name }}
+          if-no-files-found: error
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: novanative-libs-*
+          path: merged
+          merge-multiple: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novanative-libs
+          path: merged/*
